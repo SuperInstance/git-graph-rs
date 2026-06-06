@@ -190,9 +190,12 @@ impl CommitGraph {
 
     /// Topological sort (roots first for a child→parent DAG).
     pub fn topological_sort(&self) -> Vec<String> {
+        // petgraph toposort returns leaves-first for child→parent edges
+        // We reverse to get roots-first (parents before children)
         let sorted = petgraph::algo::toposort(&self.graph, None).unwrap_or_default();
         sorted
             .into_iter()
+            .rev()
             .filter_map(|idx| self.graph.node_weight(idx).map(|c| c.hash.clone()))
             .collect()
     }
