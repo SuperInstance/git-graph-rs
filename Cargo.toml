@@ -1,0 +1,17 @@
+[package]
+name = "git-graph"
+version = "0.1.0"
+edition = "2021"
+description = "Model git repositories as graphs for agent coordination"
+
+[lib]
+name = "git_graph"
+path = "src/lib.rs"
+
+[[bin]]
+name = "git-graph"
+path = "src/main.rs"
+
+[dependencies]
+petgraph = "0.6"
+thiserror = "1"
