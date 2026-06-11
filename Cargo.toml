@@ -2,6 +2,7 @@
 repository = "https://github.com/SuperInstance/git-graph-rs"
 name = "git-graph"
 version = "0.1.0"
+license = "MIT OR Apache-2.0"
 edition = "2021"
 description = "Model git repositories as graphs for agent coordination"
 
