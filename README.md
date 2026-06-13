@@ -1,118 +1,126 @@
-# git-graph
+# git-graph: Model Git Repositories as Graphs for Agent Coordination
 
-Models git repositories as graphs for agent coordination.
+A Rust library that models git commit history as directed acyclic graphs (DAGs), branches as forests, agent assignments as topologies, and commit-graph paths as message routes. Built on `petgraph` for multi-agent coordination systems where git is the shared state.
 
-Built on [petgraph](https://crates.io/crates/petgraph), this crate provides graph-based data structures for reasoning about commits, branches, agent topologies, message routing, memory indexing, and fleet status across multi-agent systems.
+## Why It Matters
 
-## Components
+When multiple AI agents work in the same repository — each on their own branch — the commit graph becomes the **shared coordination substrate**. Reasoning about this graph lets you answer:
 
-### `CommitGraph`
+- **Where did branches diverge?** (find common ancestors for merge planning)
+- **Who's working on what?** (agent-to-branch topology)
+- **Are two agents going to conflict?** (divergence detection)
+- **How do messages route between agents?** (shortest path through commit DAG)
+- **Is the fleet healthy?** (staleness, dirty workspaces, health aggregation)
 
-A directed acyclic graph (DAG) of commits with parent tracking. Edges point from child → parent, matching git's direction.
+This library provides all of these as composable graph algorithms.
+
+## How It Works
+
+### Commit Graph (DAG)
+
+Commits are nodes; edges point from child → parent (matching git's direction). This is a **DAG** because git history is acyclic.
+
+```
+    C --- D
+   /         \
+  A --- B --- E (merge)
+```
+
+**Operations**:
+
+| Operation | Algorithm | Complexity |
+|-----------|-----------|------------|
+| `insert(commit)` | Hash map lookup/insert | O(1) avg |
+| `add_parent(child, parent)` | Edge insert + dedup | O(1) avg |
+| `parents(hash)` | Outgoing neighbors | O(d) |
+| `children(hash)` | Incoming neighbors | O(d) |
+| `roots()` / `leaves()` | Scan for degree-0 nodes | O(V) |
+| `lca(a, b)` | BFS from b through ancestor set of a | O(V + E) |
+| `topological_sort()` | Kahn's algorithm (via petgraph) | O(V + E) |
+
+### Branch Forest
+
+Tracks named branches over the commit DAG with divergence detection:
+
+```
+find_divergence("feature", "main") → DivergencePoint {
+    common_ancestor: "abc123",
+    branch_a: "feature",
+    branch_b: "main",
+}
+```
+
+Uses `lca` on the commit DAG to find the merge base.
+
+### Agent Topology
+
+Maps agents to branches and detects conflicts:
+
+```
+conflict exists if:
+    agent_a.status == "active" AND agent_b.status == "active"
+    AND their branches have diverged from a common ancestor
+```
+
+Checks all O(N²) agent pairs, each requiring an LCA query.
+
+### Message Routing
+
+BFS through the commit graph treated as **undirected** (traverse both parent→child and child→parent edges), so messages can route up through common ancestors and down to sibling branches:
+
+```
+route(B → C) = B → A → C  (through common ancestor A)
+```
+
+**Complexity**: O(V + E) per BFS query.
+
+### Fleet Status
+
+Aggregate health across all agent workspaces. Uses a priority ordering:
+
+```
+Healthy (0) < Degraded (1) < Unhealthy (2) < Unknown (3)
+overall_health = max(health_i)  // worst-case wins
+```
+
+Also tracks dirty workspaces (uncommitted changes > 0) and stale workspaces (last commit timestamp < threshold).
+
+## Quick Start
 
 ```rust
 use git_graph::{CommitGraph, CommitNode};
 
-let mut graph = CommitGraph::new();
-graph.insert(CommitNode {
-    hash: "abc123".into(),
-    message: "initial commit".into(),
-    author: "agent-1".into(),
-    timestamp: 1717700000,
-});
-graph.add_parent("def456", "abc123");
+let mut g = CommitGraph::new();
+g.insert(CommitNode { hash: "aaa".into(), message: "root".into(), author: "alice".into(), timestamp: 100 });
+g.insert(CommitNode { hash: "bbb".into(), message: "child".into(), author: "bob".into(), timestamp: 200 });
+g.add_parent("bbb", "aaa");
 
-// Find lowest common ancestor
-let lca = graph.lca("branch-a-tip", "branch-b-tip");
-
-// Topological sort
-let order = graph.topological_sort();
+assert_eq!(g.parents("bbb"), vec!["aaa"]);
+assert_eq!(g.children("aaa"), vec!["bbb"]);
+assert_eq!(g.lca("aaa", "bbb"), Some("aaa".into()));
 ```
 
-### `BranchForest`
+## API
 
-Tracks branches and their divergence points. Wraps a `CommitGraph` and maps branch names to tip commits.
+| Module | Key Types | Purpose |
+|--------|-----------|---------|
+| `commit_graph` | `CommitGraph`, `CommitNode` | DAG of commits |
+| `branch_forest` | `BranchForest`, `BranchInfo`, `DivergencePoint` | Branch tracking |
+| `agent_topology` | `AgentTopology`, `AgentAssignment`, `ConflictInfo` | Agent ↔ branch mapping |
+| `message_route` | `MessageRoute` | Shortest-path routing |
+| `memory_index` | `MemoryIndex`, `MemoryEntry` | Git-tag-backed KV store |
+| `fleet_status` | `FleetStatus`, `WorkspaceStatus`, `Health` | Fleet health aggregation |
 
-```rust
-use git_graph::{CommitGraph, BranchForest};
+## Architecture Notes
 
-let mut forest = BranchForest::new(graph);
-forest.add_branch("main", "abc123", None);
-forest.add_branch("feature", "def456", Some("agent-1".into()));
+This is an **η (eta)** module — orchestration built on top of git's **γ** (the commit graph data structure). In the γ + η = C framework, git itself is the γ (deterministic content-addressed storage), and this crate is the η that adds coordination semantics: divergence detection, conflict prediction, message routing, and fleet health. The composition γ + η = C means "coordinated agent work backed by git history."
 
-let divergence = forest.find_divergence("main", "feature");
-```
+## References
 
-### `AgentTopology`
-
-Maps agents to branches and detects merge conflicts between active agent thought branches.
-
-```rust
-use git_graph::{CommitGraph, BranchForest, AgentTopology};
-
-let mut topo = AgentTopology::new(forest);
-topo.assign("agent-1", "feature-a", "refactor", "active");
-topo.assign("agent-2", "feature-b", "new-feature", "active");
-
-let conflicts = topo.detect_conflicts();
-```
-
-### `MessageRoute`
-
-Finds the shortest path between two commits through the DAG, treating it as undirected. This enables message routing between agents through common ancestors.
-
-```rust
-use git_graph::{CommitGraph, MessageRoute};
-
-let router = MessageRoute::new(&graph);
-let path = router.find_route("agent-a-commit", "agent-b-commit");
-let distance = router.distance("commit-x", "commit-y");
-```
-
-### `MemoryIndex`
-
-Indexes git tags as a key-value memory store. Agents can store and retrieve memories using tags as the backing store.
-
-```rust
-use git_graph::MemoryIndex;
-
-let mut memory = MemoryIndex::new();
-memory.put("config", "model=gpt-4", 1717700000);
-memory.put("context", "working on auth", 1717700100);
-
-let value = memory.get("config");
-let recent = memory.since(1717700050);
-let results = memory.search("auth");
-```
-
-### `FleetStatus`
-
-Aggregates status across multiple agent workspaces — health, uncommitted changes, staleness.
-
-```rust
-use git_graph::{FleetStatus, WorkspaceStatus, Health};
-
-let mut fleet = FleetStatus::new();
-fleet.update(WorkspaceStatus {
-    agent_id: "agent-1".into(),
-    branch: "main".into(),
-    uncommitted_changes: 0,
-    last_commit_ts: 1717700000,
-    health: Health::Healthy,
-    active_tasks: 3,
-});
-
-let overall = fleet.overall_health();
-let dirty = fleet.dirty_workspaces();
-let stale = fleet.stale_since(1717600000);
-```
-
-## Installation
-
-```toml
-[dependencies]
-git-graph = "0.1"
-```
+- Eppstein, D. (2004). *Finding the k Shortest Paths*. SIAM J. Computing 28(2).
+- petgraph: [docs.rs/petgraph](https://docs.rs/petgraph)
+- Chacon, S. & Straub, B. (2014). *Pro Git* (2nd ed.). Apress.
+- Hewitt, C. (1977). *Actor Model of Computation*. MIT AI Memo 410.
 
 ## License
 
